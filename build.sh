@@ -16,7 +16,7 @@ export CROSS_COMPILE=${HOME}/android/uberbuild/out/aarch64-linux-android-6.x/bin
 DEFCONFIG="sharkey_defconfig"
 
 # Kernel Details
-VER=".R20.marlin"
+VER=".R21.marlin"
 
 # Paths
 KERNEL_DIR=`pwd`
