@@ -16,7 +16,7 @@ export CROSS_COMPILE=${HOME}/android/uberbuild/out/aarch64-linux-android-6.x/bin
 DEFCONFIG="sharkey_defconfig"
 
 # Kernel Details
-VER=".R43.marlin"
+VER=".R44.marlin"
 
 # Paths
 KERNEL_DIR=`pwd`
@@ -42,7 +42,7 @@ function make_kernel {
 		echo
 		make $DEFCONFIG
 		make $THREAD
-		
+
 }
 
 function make_modules {
@@ -144,4 +144,3 @@ DATE_END=$(date +"%s")
 DIFF=$(($DATE_END - $DATE_START))
 echo "Time: $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
 echo
-
