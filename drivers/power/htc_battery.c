@@ -1453,14 +1453,12 @@ static void batt_worker(struct work_struct *work)
 	if ((int)htc_batt_info.rep.charging_source > POWER_SUPPLY_TYPE_BATTERY) {
 		/*  STEP 11.1.1 check and update chg_dis_reason */
 		if (g_ftm_charger_control_flag == FTM_FAST_CHARGE || g_flag_force_ac_chg) {
-			s_prev_user_set_chg_curr = get_property(htc_batt_info.usb_psy, POWER_SUPPLY_PROP_CURRENT_MAX);
 			if (htc_batt_info.rep.charging_source == POWER_SUPPLY_TYPE_USB){
 				user_set_chg_curr = FAST_CHARGE_CURR;
 			} else {
 				user_set_chg_curr = WALL_CHARGE_CURR;
 			}
 		} else if (g_ftm_charger_control_flag == FTM_SLOW_CHARGE) {
-			s_prev_user_set_chg_curr = get_property(htc_batt_info.usb_psy, POWER_SUPPLY_PROP_CURRENT_MAX);
 			user_set_chg_curr = SLOW_CHARGE_CURR;
 			pmi8994_set_iusb_max(user_set_chg_curr);
 #ifdef CONFIG_HTC_CHARGER
@@ -1470,7 +1468,7 @@ static void batt_worker(struct work_struct *work)
 		} else {
 			/* WA: QCT  recorgnize D+/D- open charger won't set 500mA. */
 			if ((htc_batt_info.rep.charging_source == POWER_SUPPLY_TYPE_USB)) {
-				s_prev_user_set_chg_curr = get_property(htc_batt_info.usb_psy, POWER_SUPPLY_PROP_CURRENT_MAX);
+				user_set_chg_curr = get_property(htc_batt_info.usb_psy, POWER_SUPPLY_PROP_CURRENT_MAX);
 				if (!get_connect2pc() && !g_rerun_apsd_done && !g_is_unknown_charger) {
 					user_set_chg_curr = SLOW_CHARGE_CURR;
 					if (delayed_work_pending(&htc_batt_info.chk_unknown_chg_work))
@@ -1479,15 +1477,14 @@ static void batt_worker(struct work_struct *work)
 						&htc_batt_info.chk_unknown_chg_work,
 						msecs_to_jiffies(CHG_UNKNOWN_CHG_PERIOD_MS));
 				} else {
-					if (s_prev_user_set_chg_curr < SLOW_CHARGE_CURR)
-						s_prev_user_set_chg_curr = SLOW_CHARGE_CURR;
-					user_set_chg_curr = s_prev_user_set_chg_curr;
+					if (user_set_chg_curr < SLOW_CHARGE_CURR)
+						user_set_chg_curr = SLOW_CHARGE_CURR;
 				}
 			} else if (htc_batt_info.rep.charging_source == POWER_SUPPLY_TYPE_USB_HVDCP){
-				s_prev_user_set_chg_curr = get_property(htc_batt_info.usb_psy, POWER_SUPPLY_PROP_CURRENT_MAX);
+				user_set_chg_curr = get_property(htc_batt_info.usb_psy, POWER_SUPPLY_PROP_CURRENT_MAX);
 				pmi8994_set_iusb_max(HVDCP_CHARGE_CURR);
 			} else if (htc_batt_info.rep.charging_source == POWER_SUPPLY_TYPE_USB_HVDCP_3){
-				s_prev_user_set_chg_curr = get_property(htc_batt_info.usb_psy, POWER_SUPPLY_PROP_CURRENT_MAX);
+				user_set_chg_curr = get_property(htc_batt_info.usb_psy, POWER_SUPPLY_PROP_CURRENT_MAX);
 				pmi8994_set_iusb_max(HVDCP_3_CHARGE_CURR);
 			}
 		}
@@ -2002,6 +1999,7 @@ void htc_stats_update(int category, unsigned long chg_time, unsigned long dischg
     {
         case HTC_STATS_CATEGORY_ALL: category_ptr = &g_htc_stats_category_all; break;
         case HTC_STATS_CATEGORY_FULL_LOW: category_ptr = &g_htc_stats_category_full_low; break;
+	default: return;
     }
 
     category_ptr->sample_count += 1;
@@ -2011,11 +2009,12 @@ void htc_stats_update(int category, unsigned long chg_time, unsigned long dischg
 
 const char* htc_stats_category2str(int category)
 {
-    const char* ret;
+    const char* ret = NULL;
     switch (category)
     {
         case HTC_STATS_CATEGORY_ALL: ret = "all"; break;
         case HTC_STATS_CATEGORY_FULL_LOW: ret = "full_low"; break;
+	default: return ret;
     }
     return ret;
 }
@@ -2029,6 +2028,7 @@ void htc_stats_calculate_statistics_data(int category, unsigned long chg_time, u
     switch (category) {
         case HTC_STATS_CATEGORY_ALL: category_ptr = &g_htc_stats_category_all; break;
         case HTC_STATS_CATEGORY_FULL_LOW: category_ptr = &g_htc_stats_category_full_low; break;
+        default: return;
     }
 
     if (htc_stats_is_valid(category, chg_time, dischg_time, unplug_level, plug_level))
@@ -2333,6 +2333,7 @@ module_param_named(
 #define PD_LIMIT_VBUS_MV 5000
 #define PD_LIMIT_CURRENT_MA 3000
 #define MESG_MAX_LENGTH 300
+#define PD_MAX_POWER 18000000	/* 18W = 9V * 2A */
 int htc_battery_pd_charger_support(int size, struct htc_pd_data pd_data, int *max_mA)
 {
 	int i = 0;
@@ -2354,6 +2355,11 @@ int htc_battery_pd_charger_support(int size, struct htc_pd_data pd_data, int *ma
 		pd_vbus_vol = pd_data.pd_list[i][0];
 		pd_ma = pd_data.pd_list[i][1];
 		pd_power = pd_vbus_vol * pd_ma;
+
+		if (pd_power > PD_MAX_POWER) {
+			pd_power = PD_MAX_POWER;
+			pd_ma = pd_power / pd_vbus_vol;
+		}
 
 		if (pd_vbus_vol > PD_MAX_VBUS) {
 			pr_debug("[BATT][PD] Voltage %dV > %dV, skip to prevent OVP\n",

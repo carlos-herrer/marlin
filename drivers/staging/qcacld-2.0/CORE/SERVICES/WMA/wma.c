@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -111,6 +111,7 @@
 
 #include "wma_ocb.h"
 #include "wma_nan_datapath.h"
+#include "adf_trace.h"
 
 /* ################### defines ################### */
 /*
@@ -3908,6 +3909,8 @@ static int wma_extscan_capabilities_event_handler (void *handle,
 				event->num_epno_networks;
 	dest_capab->max_number_of_white_listed_ssid =
 				event->num_roam_ssid_whitelist;
+	dest_capab->max_number_of_black_listed_bssid =
+				event->num_roam_bssid_blacklist;
 	dest_capab->status = 0;
 
 	WMA_LOGD("%s: request_id: %u status: %d",
@@ -3928,11 +3931,13 @@ static int wma_extscan_capabilities_event_handler (void *handle,
 		dest_capab->max_significant_wifi_change_aps);
 	WMA_LOGD("%s: Capabilities: max_hotlist_ssids: %d,"
 		 "max_number_epno_networks: %d, max_number_epno_networks_by_ssid: %d,"
-		 "max_number_of_white_listed_ssid: %d",
+		 "max_number_of_white_listed_ssid: %d,"
+		 "max_number_of_black_listed_bssid: %d ",
 		 __func__, dest_capab->max_hotlist_ssids,
 		dest_capab->max_number_epno_networks,
 		dest_capab->max_number_epno_networks_by_ssid,
-		dest_capab->max_number_of_white_listed_ssid);
+		dest_capab->max_number_of_white_listed_ssid,
+		dest_capab->max_number_of_black_listed_bssid);
 
 	pMac->sme.pExtScanIndCb(pMac->hHdd,
 				eSIR_EXTSCAN_GET_CAPABILITIES_IND,
@@ -6579,6 +6584,9 @@ static int wma_roam_synch_event_handler(void *handle, u_int8_t *event, u_int32_t
 	 return -EINVAL;
 	}
 
+	DPTRACE(adf_dp_trace_record_event(ADF_DP_TRACE_EVENT_RECORD,
+		synch_event->vdev_id, ADF_PROTO_TYPE_EVENT, ADF_ROAM_SYNCH));
+
 	if(wma->interfaces[synch_event->vdev_id].roam_synch_in_progress ==
 		VOS_TRUE) {
 	  WMA_LOGE("%s: Ignoring RSI since one is already in progress",
@@ -8967,6 +8975,8 @@ VOS_STATUS wma_get_buf_start_scan_cmd(tp_wma_handle wma_handle,
 	u_int8_t SSID_num;
 	int i;
 	int len = sizeof(*cmd);
+	wmi_vendor_oui *voui = NULL;
+	struct vendor_oui *pvoui = NULL;
 	tpAniSirGlobal pMac = (tpAniSirGlobal )vos_get_context(VOS_MODULE_ID_PE,
 				wma_handle->vos_context);
 
@@ -8990,6 +9000,10 @@ VOS_STATUS wma_get_buf_start_scan_cmd(tp_wma_handle wma_handle,
 	len += WMI_TLV_HDR_SIZE; /* Length TLV placeholder for array of bytes */
 	if (scan_req->uIEFieldLen)
 		len += roundup(scan_req->uIEFieldLen, sizeof(u_int32_t));
+
+	len += WMI_TLV_HDR_SIZE; /* Length of TLV for array of wmi_vendor_oui */
+	if (scan_req->num_vendor_oui)
+		len += scan_req->num_vendor_oui * sizeof(wmi_vendor_oui);
 
 	/* Allocate the memory */
 	*buf = wmi_buf_alloc(wma_handle->wmi_handle, len);
@@ -9080,6 +9094,27 @@ VOS_STATUS wma_get_buf_start_scan_cmd(tp_wma_handle wma_handle,
 	 * By default, prefer throughput performance over scan cycle time.
 	 */
 	cmd->burst_duration = 0;
+
+	/* mac randomization attributes */
+	if (scan_req->enable_scan_randomization) {
+		cmd->scan_ctrl_flags |= WMI_SCAN_ADD_SPOOFED_MAC_IN_PROBE_REQ |
+					WMI_SCAN_RANDOM_SEQ_NO_IN_PROBE_REQ;
+		WMI_CHAR_ARRAY_TO_MAC_ADDR(scan_req->mac_addr, &cmd->mac_addr);
+		WMI_CHAR_ARRAY_TO_MAC_ADDR(scan_req->mac_addr_mask,
+						&cmd->mac_mask);
+	}
+	if (scan_req->ie_whitelist)
+		cmd->scan_ctrl_flags |=
+				WMI_SCAN_ENABLE_IE_WHTELIST_IN_PROBE_REQ;
+
+	WMA_LOGI("scan_ctrl_flags = %x", cmd->scan_ctrl_flags);
+
+	if (scan_req->ie_whitelist) {
+		for (i = 0; i < PROBE_REQ_BITMAP_LEN; i++)
+			cmd->ie_bitmap[i] = scan_req->probe_req_ie_bitmap[i];
+	}
+
+	cmd->num_vendor_oui = scan_req->num_vendor_oui;
 
 	if (!scan_req->p2pScanType) {
 		WMA_LOGD("Normal Scan request");
@@ -9290,6 +9325,29 @@ VOS_STATUS wma_get_buf_start_scan_cmd(tp_wma_handle wma_handle,
 			     scan_req->uIEFieldLen);
 	}
 	buf_ptr += WMI_TLV_HDR_SIZE + ie_len_with_pad;
+
+	/* mac randomization */
+	WMITLV_SET_HDR(buf_ptr, WMITLV_TAG_ARRAY_STRUC,
+		       scan_req->num_vendor_oui *
+		       sizeof(wmi_vendor_oui));
+
+	buf_ptr += WMI_TLV_HDR_SIZE;
+
+	if (cmd->num_vendor_oui != 0) {
+		voui = (wmi_vendor_oui *)buf_ptr;
+		pvoui = (struct vendor_oui *)((u_int8_t *)scan_req +
+			(scan_req->oui_field_offset));
+		for (i = 0; i < cmd->num_vendor_oui; i++) {
+			WMITLV_SET_HDR(&voui[i].tlv_header,
+				WMITLV_TAG_STRUC_wmi_vendor_oui,
+				WMITLV_GET_STRUCT_TLVLEN(
+				wmi_vendor_oui));
+			voui[i].oui_type_subtype = pvoui[i].oui_type |
+						(pvoui[i].oui_subtype << 24);
+		}
+		buf_ptr += cmd->num_vendor_oui *
+				sizeof(wmi_vendor_oui);
+	}
 
 	*buf_len = len;
 	return VOS_STATUS_SUCCESS;
@@ -17749,6 +17807,8 @@ static void wma_delete_sta(tp_wma_handle wma, tpDeleteStaParams del_sta)
 		WMA_LOGD("%s: to delete sta for IBSS mode", __func__);
 	}
 #endif
+	if (del_sta->staType == STA_ENTRY_NDI_PEER)
+		oper_mode = BSS_OPERATIONAL_MODE_NDI;
 
 	switch (oper_mode) {
 	case BSS_OPERATIONAL_MODE_STA:
@@ -17760,6 +17820,9 @@ static void wma_delete_sta(tp_wma_handle wma, tpDeleteStaParams del_sta)
 #endif
 	case BSS_OPERATIONAL_MODE_AP:
 		wma_delete_sta_req_ap_mode(wma, del_sta);
+		break;
+	case BSS_OPERATIONAL_MODE_NDI:
+		wma_delete_sta_req_ndi_mode(wma, del_sta);
 		break;
 	}
 
@@ -19595,17 +19658,26 @@ static VOS_STATUS wma_pno_start(tp_wma_handle wma, tpSirPNOScanReq pno)
 	u_int8_t *buf_ptr;
 	u_int8_t i;
 	int ret;
+	wmi_vendor_oui *voui = NULL;
+	struct vendor_oui *pvoui = NULL;
+	connected_nlo_rssi_params *nlo_rssi = NULL;
 
 	WMA_LOGD("PNO Start");
 
 	len = sizeof(*cmd) +
 	      WMI_TLV_HDR_SIZE + /* TLV place holder for array of structures nlo_configured_parameters(nlo_list) */
-	      WMI_TLV_HDR_SIZE; /* TLV place holder for array of uint32 channel_list */
+	      WMI_TLV_HDR_SIZE + /* TLV place holder for array of uint32 channel_list */
+	      WMI_TLV_HDR_SIZE + /* TLV of nlo_channel_prediction_cfg */
+	      WMI_TLV_HDR_SIZE; /* array of wmi_vendor_oui */
 
 	len += sizeof(u_int32_t) * MIN(pno->aNetworks[0].ucChannelCount,
 				   WMI_NLO_MAX_CHAN);
 	len += sizeof(nlo_configured_parameters) *
 				MIN(pno->ucNetworksCount, WMI_NLO_MAX_SSIDS);
+	/* Add the fixed length of enlo_candidate_score_params */
+	len += sizeof(enlo_candidate_score_params);
+	len += sizeof(wmi_vendor_oui) * pno->num_vendor_oui;
+	len += sizeof(connected_nlo_rssi_params);
 
 	buf = wmi_buf_alloc(wma->wmi_handle, len);
 	if (!buf) {
@@ -19636,6 +19708,27 @@ static VOS_STATUS wma_pno_start(tp_wma_handle wma, tpSirPNOScanReq pno)
 	WMA_LOGD("fast_scan_period: %d msec slow_scan_period: %d msec",
 			cmd->fast_scan_period, cmd->slow_scan_period);
 	WMA_LOGD("fast_scan_max_cycles: %d", cmd->fast_scan_max_cycles);
+
+	if (pno->enable_pno_scan_randomization) {
+		cmd->flags |= WMI_NLO_CONFIG_SPOOFED_MAC_IN_PROBE_REQ |
+				WMI_NLO_CONFIG_RANDOM_SEQ_NO_IN_PROBE_REQ;
+		WMI_CHAR_ARRAY_TO_MAC_ADDR(pno->mac_addr, &cmd->mac_addr);
+		WMI_CHAR_ARRAY_TO_MAC_ADDR(pno->mac_addr_mask, &cmd->mac_mask);
+	}
+
+	if (pno->ie_whitelist)
+		cmd->flags |= WMI_NLO_CONFIG_ENABLE_IE_WHITELIST_IN_PROBE_REQ;
+
+	cmd->flags |= WMI_NLO_CONFIG_ENABLE_CNLO_RSSI_CONFIG;
+
+	WMA_LOGI("pno flags = %x", cmd->flags);
+
+	cmd->num_vendor_oui = pno->num_vendor_oui;
+
+	if (pno->ie_whitelist) {
+		for (i = 0; i < PROBE_REQ_BITMAP_LEN; i++)
+			cmd->ie_bitmap[i] = pno->probe_req_ie_bitmap[i];
+	}
 
 	buf_ptr += sizeof(wmi_nlo_config_cmd_fixed_param);
 
@@ -19696,6 +19789,45 @@ static VOS_STATUS wma_pno_start(tp_wma_handle wma, tpSirPNOScanReq pno)
 		WMA_LOGD("Ch[%d]: %d MHz", i, channel_list[i]);
 	}
 	buf_ptr += cmd->num_of_channels * sizeof(u_int32_t);
+
+	/*
+	 * For pno start, this is not needed but to get the correct offset of
+	 * wmi_vendor_oui, this is needed
+	 */
+	WMITLV_SET_HDR(buf_ptr, WMITLV_TAG_ARRAY_STRUC, 0);
+	buf_ptr += WMI_TLV_HDR_SIZE; /* zero no.of nlo_channel_prediction_cfg */
+	WMITLV_SET_HDR(buf_ptr, WMITLV_TAG_STRUC_enlo_candidate_score_param,
+			WMITLV_GET_STRUCT_TLVLEN(enlo_candidate_score_params));
+	buf_ptr += sizeof(enlo_candidate_score_params);
+
+	/* ie white list */
+	WMITLV_SET_HDR(buf_ptr, WMITLV_TAG_ARRAY_STRUC,
+		       pno->num_vendor_oui *
+		       sizeof(wmi_vendor_oui));
+
+	buf_ptr += WMI_TLV_HDR_SIZE;
+
+	if (cmd->num_vendor_oui != 0) {
+		voui = (wmi_vendor_oui *)buf_ptr;
+		pvoui = (struct vendor_oui *)((uint8_t *)pno + sizeof(*pno));
+		for (i = 0; i < cmd->num_vendor_oui; i++) {
+			WMITLV_SET_HDR(&voui[i].tlv_header,
+				WMITLV_TAG_STRUC_wmi_vendor_oui,
+				WMITLV_GET_STRUCT_TLVLEN(
+				wmi_vendor_oui));
+			voui[i].oui_type_subtype = pvoui[i].oui_type |
+						(pvoui[i].oui_subtype << 24);
+		}
+		buf_ptr += cmd->num_vendor_oui * sizeof(wmi_vendor_oui);
+	}
+
+	nlo_rssi = (connected_nlo_rssi_params *) buf_ptr;
+	WMITLV_SET_HDR(&nlo_rssi->tlv_header,
+		WMITLV_TAG_STRUC_wmi_connected_nlo_rssi_params,
+		WMITLV_GET_STRUCT_TLVLEN(connected_nlo_rssi_params));
+	nlo_rssi->relative_rssi = pno->relative_rssi;
+	nlo_rssi->relative_rssi_5g_pref = pno->relative_rssi_5g_pref;
+	buf_ptr += sizeof(connected_nlo_rssi_params);
 
 	/* TODO: Discrete firmware doesn't have command/option to configure
 	 * App IE which comes from wpa_supplicant as of part PNO start request.
@@ -20938,15 +21070,13 @@ wma_wow_get_pkt_proto_subtype(uint8_t *data,
 		   adf_os_cpu_to_be16(ether_type)) {
 		if (len >= WMA_EAPOL_SUBTYPE_GET_MIN_LEN)
 			return adf_nbuf_data_get_eapol_subtype(data);
-		VOS_TRACE(VOS_MODULE_ID_WDA,
-			VOS_TRACE_LEVEL_ERROR, "EAPOL Packet");
+		WMA_LOGD("EAPOL Packet");
 		return ADF_PROTO_INVALID;
 	} else if (ADF_NBUF_TRAC_ARP_ETH_TYPE ==
 		   adf_os_cpu_to_be16(ether_type)) {
 		if (len >= WMA_ARP_SUBTYPE_GET_MIN_LEN)
 			return adf_nbuf_data_get_arp_subtype(data);
-		VOS_TRACE(VOS_MODULE_ID_WDA,
-			VOS_TRACE_LEVEL_ERROR, "ARP Packet");
+		WMA_LOGD("ARP Packet");
 		return ADF_PROTO_INVALID;
 	} else if (ADF_NBUF_TRAC_IPV4_ETH_TYPE ==
 		   adf_os_cpu_to_be16(ether_type)) {
@@ -20959,19 +21089,15 @@ wma_wow_get_pkt_proto_subtype(uint8_t *data,
 				if (len >= WMA_ICMP_SUBTYPE_GET_MIN_LEN)
 					return adf_nbuf_data_get_icmp_subtype(
 							data);
-				VOS_TRACE(VOS_MODULE_ID_WDA,
-					VOS_TRACE_LEVEL_ERROR, "ICMP Packet");
+				WMA_LOGD("ICMP Packet");
 				return ADF_PROTO_INVALID;
 			} else if (proto_type == ADF_NBUF_TRAC_UDP_TYPE) {
 				if (len >= WMA_IS_DHCP_GET_MIN_LEN) {
-					if (adf_nbuf_data_is_dhcp_pkt(data) ==
-						    A_STATUS_OK) {
+					if (adf_nbuf_data_is_dhcp_pkt(data)) {
 						if (len >=
 						   WMA_DHCP_SUBTYPE_GET_MIN_LEN)
 						  return adf_nbuf_data_get_dhcp_subtype(data);
-						VOS_TRACE(VOS_MODULE_ID_WDA,
-						    VOS_TRACE_LEVEL_ERROR,
-						    "DHCP Packet");
+						WMA_LOGD("DHCP Packet");
 						return ADF_PROTO_INVALID;
 					}
 				}
@@ -20980,8 +21106,7 @@ wma_wow_get_pkt_proto_subtype(uint8_t *data,
 				return ADF_PROTO_IPV4_TCP;
 			}
 		}
-		VOS_TRACE(VOS_MODULE_ID_WDA,
-			VOS_TRACE_LEVEL_ERROR, "IPV4 Packet");
+		WMA_LOGD("IPV4 Packet");
 		return ADF_PROTO_INVALID;
 	} else if (ADF_NBUF_TRAC_IPV6_ETH_TYPE ==
 		   adf_os_cpu_to_be16(ether_type)) {
@@ -20989,13 +21114,12 @@ wma_wow_get_pkt_proto_subtype(uint8_t *data,
 			uint8_t proto_type;
 
 			proto_type = adf_nbuf_data_get_ipv6_proto(data);
-			WMA_LOGE("IPV6_proto_type: %u", proto_type);
+			WMA_LOGD("IPV6_proto_type: %u", proto_type);
 			if (proto_type == ADF_NBUF_TRAC_ICMPV6_TYPE) {
 				if (len >= WMA_ICMPV6_SUBTYPE_GET_MIN_LEN)
 					return adf_nbuf_data_get_icmpv6_subtype(
 							data);
-				VOS_TRACE(VOS_MODULE_ID_WDA,
-					VOS_TRACE_LEVEL_ERROR, "ICMPV6 Packet");
+				WMA_LOGD("ICMPV6 Packet");
 				return ADF_PROTO_INVALID;
 			} else if (proto_type == ADF_NBUF_TRAC_UDP_TYPE) {
 				return ADF_PROTO_IPV6_UDP;
@@ -21003,8 +21127,7 @@ wma_wow_get_pkt_proto_subtype(uint8_t *data,
 				return ADF_PROTO_IPV6_TCP;
 			}
 		}
-		VOS_TRACE(VOS_MODULE_ID_WDA,
-			VOS_TRACE_LEVEL_ERROR, "IPV6 Packet");
+		WMA_LOGD("IPV6 Packet");
 		return ADF_PROTO_INVALID;
 	}
 
@@ -21052,7 +21175,7 @@ static void wma_wow_parse_data_pkt_buffer(uint8_t *data,
 				EAPOL_PKT_LEN_OFFSET));
 			key_len = (uint16_t)(*(uint16_t *)(data +
 				EAPOL_KEY_LEN_OFFSET));
-			WMA_LOGE("Pkt_len: %u, Key_len: %u",
+			WMA_LOGD("Pkt_len: %u, Key_len: %u",
 				adf_os_cpu_to_be16(pkt_len),
 				adf_os_cpu_to_be16(key_len));
 		}
@@ -21073,7 +21196,7 @@ static void wma_wow_parse_data_pkt_buffer(uint8_t *data,
 				DHCP_PKT_LEN_OFFSET));
 			transaction_id = (uint32_t)(*(uint32_t *)(data +
 				DHCP_TRANSACTION_ID_OFFSET));
-			WMA_LOGE("Pkt_len: %u, Transaction_id: %u",
+			WMA_LOGD("Pkt_len: %u, Transaction_id: %u",
 				adf_os_cpu_to_be16(pkt_len),
 				adf_os_cpu_to_be32(transaction_id));
 		}
@@ -21094,7 +21217,7 @@ static void wma_wow_parse_data_pkt_buffer(uint8_t *data,
 				IPV4_PKT_LEN_OFFSET));
 			seq_num = (uint16_t)(*(uint16_t *)(data +
 				ICMP_SEQ_NUM_OFFSET));
-			WMA_LOGE("Pkt_len: %u, Seq_num: %u",
+			WMA_LOGD("Pkt_len: %u, Seq_num: %u",
 				adf_os_cpu_to_be16(pkt_len),
 				adf_os_cpu_to_be16(seq_num));
 		}
@@ -21109,7 +21232,7 @@ static void wma_wow_parse_data_pkt_buffer(uint8_t *data,
 				IPV6_PKT_LEN_OFFSET));
 			seq_num = (uint16_t)(*(uint16_t *)(data +
 				ICMPV6_SEQ_NUM_OFFSET));
-			WMA_LOGE("len: %u, SN: %u",
+			WMA_LOGD("len: %u, SN: %u",
 				adf_os_cpu_to_be16(pkt_len),
 				adf_os_cpu_to_be16(seq_num));
 		}
@@ -21557,7 +21680,7 @@ static int wma_wow_wakeup_host_event(void *handle, u_int8_t *event,
 		break;
 #endif
 	case WOW_REASON_NAN_DATA:
-		WMA_LOGD(FL("Host woken up for NAN data path event from FW"));
+		WMA_LOGD(FL("Host woken up for NAN data event from FW"));
 		if (param_buf->wow_packet_buffer) {
 			wow_buf_pkt_len =
 				*(uint32_t *)param_buf->wow_packet_buffer;
@@ -23112,6 +23235,9 @@ suspend_all_iface:
 	 *  2) Is any one of vdev in connected state (in STA mode) ?
 	 *  3) Is PNO in progress in any one of vdev ?
 	 *  4) Is Extscan in progress in any one of vdev ?
+	 *  5) Is any vdev in NAN data mode? BSS is already started at the
+	 *     the time of device creation. It is ready to accept data
+	 *     requests.
 	 */
 	for (i = 0; i < wma->max_bssid; i++) {
 		if ((wma_is_vdev_in_ap_mode(wma, i)
@@ -23123,6 +23249,11 @@ suspend_all_iface:
                                    WMI_SERVICE_BEACON_OFFLOAD)) {
 			WMA_LOGD("vdev %d is in beaconning mode, enabling wow",
 				 i);
+			enable_wow = true;
+		}
+		if (WMA_IS_VDEV_IN_NDI_MODE(wma->interfaces, i)) {
+			WMA_LOGD("vdev %d is in NAN data mode, enabling wow",
+				i);
 			enable_wow = true;
 		}
 	}
@@ -24914,7 +25045,7 @@ static VOS_STATUS wma_enable_arp_ns_offload(tp_wma_handle wma,
 	WMI_SET_ARP_NS_OFFLOAD_CMD_fixed_param *cmd;
 	A_UINT8* buf_ptr;
 	wmi_buf_t buf;
-	int32_t len;
+	uint32_t len;
 	VOS_STATUS status = VOS_STATUS_SUCCESS;
 	u_int8_t vdev_id;
 	tpSirHostOffloadReq ns_offload_req;
@@ -24946,6 +25077,11 @@ static VOS_STATUS wma_enable_arp_ns_offload(tp_wma_handle wma,
 		ns_offload_req = hostoffloadreq;
 		arp_offload_req = &wma->interfaces[vdev_id].arp_offload_req;
 		count = hostoffloadreq->num_ns_offload_count;
+	}
+
+	if (count >= SIR_MAC_NUM_TARGET_IPV6_NS_OFFLOAD_NA) {
+		status = VOS_STATUS_E_INVAL;
+		goto err_vdev;
 	}
 
 	len = sizeof(WMI_SET_ARP_NS_OFFLOAD_CMD_fixed_param) +
@@ -27047,7 +27183,6 @@ static VOS_STATUS wma_process_ll_stats_getReq
 	cmd->scan_ctrl_flags = WMI_SCAN_ADD_BCAST_PROBE_REQ |
 				WMI_SCAN_ADD_CCK_RATES |
 				WMI_SCAN_ADD_OFDM_RATES |
-				WMI_SCAN_ADD_SPOOFED_MAC_IN_PROBE_REQ |
 				WMI_SCAN_ADD_DS_IE_IN_PROBE_REQ;
 	cmd->scan_priority = WMI_SCAN_PRIORITY_HIGH;
 	cmd->num_ssids = 0;
@@ -28277,13 +28412,17 @@ VOS_STATUS  wma_scan_probe_setoui(tp_wma_handle wma,
 	uint32_t   len;
 	u_int8_t *buf_ptr;
 	u_int32_t *oui_buf;
+	uint32_t i = 0;
+	wmi_vendor_oui *voui = NULL;
+	struct vendor_oui *pvoui = NULL;
 
 	if (!wma || !wma->wmi_handle) {
 		WMA_LOGE("%s: WMA is closed, can not issue  cmd",
 			__func__);
 		return VOS_STATUS_E_INVAL;
 	}
-	len  = sizeof(*cmd);
+	len  = sizeof(*cmd) + WMI_TLV_HDR_SIZE +
+               psetoui->num_vendor_oui * sizeof(wmi_vendor_oui);
 	wmi_buf = wmi_buf_alloc(wma->wmi_handle, len);
 	if (!wmi_buf) {
 		WMA_LOGE("%s: wmi_buf_alloc failed", __func__);
@@ -28302,6 +28441,44 @@ VOS_STATUS  wma_scan_probe_setoui(tp_wma_handle wma,
 					| psetoui->oui[2];
 	WMA_LOGD("%s: wma:oui received from hdd %08x", __func__,
 			cmd->prob_req_oui);
+
+	cmd->vdev_id = psetoui->vdev_id;
+	cmd->flags = WMI_SCAN_PROBE_OUI_SPOOFED_MAC_IN_PROBE_REQ;
+	if (psetoui->enb_probe_req_sno_randomization)
+		cmd->flags |= WMI_SCAN_PROBE_OUI_RANDOM_SEQ_NO_IN_PROBE_REQ;
+
+	if (psetoui->ie_whitelist)
+		cmd->flags |=
+			WMI_SCAN_PROBE_OUI_ENABLE_IE_WHITELIST_IN_PROBE_REQ;
+
+	WMA_LOGI(FL("vdev_id = %d, flags = %x"), cmd->vdev_id, cmd->flags);
+
+	cmd->num_vendor_oui = psetoui->num_vendor_oui;
+
+	if (psetoui->ie_whitelist) {
+		for (i = 0; i < PROBE_REQ_BITMAP_LEN; i++)
+			cmd->ie_bitmap[i] = psetoui->probe_req_ie_bitmap[i];
+	}
+
+	buf_ptr += sizeof(*cmd);
+	WMITLV_SET_HDR(buf_ptr, WMITLV_TAG_ARRAY_STRUC,
+		       psetoui->num_vendor_oui *
+		       sizeof(wmi_vendor_oui));
+
+	buf_ptr += WMI_TLV_HDR_SIZE;
+	if (cmd->num_vendor_oui != 0) {
+		voui = (wmi_vendor_oui *)buf_ptr;
+		pvoui = (struct vendor_oui *)((u_int8_t *)psetoui +
+						sizeof(*psetoui));
+		for (i = 0; i < cmd->num_vendor_oui; i++) {
+			WMITLV_SET_HDR(&voui[i].tlv_header,
+				WMITLV_TAG_STRUC_wmi_vendor_oui,
+				WMITLV_GET_STRUCT_TLVLEN(
+				wmi_vendor_oui));
+			voui[i].oui_type_subtype = pvoui[i].oui_type |
+						(pvoui[i].oui_subtype << 24);
+		}
+	}
 
 	if (wmi_unified_cmd_send(wma->wmi_handle, wmi_buf, len,
 		WMI_SCAN_PROB_REQ_OUI_CMDID)) {
@@ -30918,6 +31095,9 @@ VOS_STATUS wma_mc_process_msg(v_VOID_t *vos_context, vos_msg_t *msg)
 		case SIR_HAL_SET_ALLOWED_ACTION_FRAMES:
 			wma_process_set_allowed_action_frames_ind(wma_handle,
 								  msg->bodyptr);
+			break;
+		case SIR_HAL_NDP_END_REQ:
+			wma_handle_ndp_end_req(wma_handle, msg->bodyptr);
 			vos_mem_free(msg->bodyptr);
 			break;
 		default:
@@ -31334,6 +31514,9 @@ static int wma_roam_event_callback(WMA_HANDLE handle, u_int8_t *event_buf,
 	wmi_event = param_buf->fixed_param;
 	WMA_LOGD("%s: Reason %x for vdevid %x, rssi %d",
 		__func__, wmi_event->reason, wmi_event->vdev_id, wmi_event->rssi);
+
+	DPTRACE(adf_dp_trace_record_event(ADF_DP_TRACE_EVENT_RECORD,
+		wmi_event->vdev_id, ADF_PROTO_TYPE_EVENT, ADF_ROAM_EVENTID));
 
 	switch(wmi_event->reason) {
 	case WMI_ROAM_REASON_BMISS:
@@ -36456,6 +36639,10 @@ void wma_process_roam_synch_complete(WMA_HANDLE handle,
 		wmi_buf_free(wmi_buf);
 		return;
 	}
+
+	DPTRACE(adf_dp_trace_record_event(ADF_DP_TRACE_EVENT_RECORD,
+		synchcnf->sessionId, ADF_PROTO_TYPE_EVENT, ADF_ROAM_COMPLETE));
+
 	return;
 }
 void wma_process_roam_synch_fail(WMA_HANDLE handle,

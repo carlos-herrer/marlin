@@ -788,6 +788,11 @@ enum qca_wlan_vendor_attr_extscan_results
      */
     QCA_WLAN_VENDOR_ATTR_EXTSCAN_RESULTS_BUCKETS_SCANNED,
 
+    /*
+     * Unsigned 32bit value; a EXTSCAN Capabilities attribute to send maximum
+     * number of blacklist bssid's that firmware can support.
+     */
+    QCA_WLAN_VENDOR_ATTR_EXTSCAN_MAX_NUM_BLACKLISTED_BSSID,
 
     /* keep last */
     QCA_WLAN_VENDOR_ATTR_EXTSCAN_RESULTS_AFTER_LAST,
@@ -1470,6 +1475,10 @@ enum qca_wlan_vendor_features {
 #define WIFI_FEATURE_MKEEP_ALIVE        0x100000  /* WiFi mkeep_alive */
 #define WIFI_FEATURE_CONFIG_NDO         0x200000  /* ND offload configure */
 #define WIFI_FEATURE_TX_TRANSMIT_POWER  0x400000  /* Tx transmit power levels */
+#define WIFI_FEATURE_CONTROL_ROAMING    0x800000  /* Enable/Disable roaming */
+#define WIFI_FEATURE_IE_WHITELIST       0x1000000 /* Support Probe IE white listing */
+#define WIFI_FEATURE_SCAN_RAND          0x2000000 /* Support MAC & Probe Sequence Number randomization */
+
 
 /* Add more features here */
 #define WIFI_TDLS_SUPPORT			BIT(0)
@@ -1992,4 +2001,18 @@ static inline void wlan_hdd_cfg80211_indicate_disconnect(struct net_device *dev,
 				GFP_KERNEL);
 }
 #endif
+
+/**
+ * enum wlan_hdd_scan_type - type of scan
+ * @WLAN_HDD_HOST_SCAN: refers to scan request from cfg80211_ops "scan"
+ * @WLAN_HDD_PNO_SCAN: refers to scan request is from "sched_scan_start"
+ *
+ * driver uses this enum to identify source of scan
+ *
+ */
+enum wlan_hdd_scan_type {
+	WLAN_HDD_HOST_SCAN,
+	WLAN_HDD_PNO_SCAN,
+};
+
 #endif

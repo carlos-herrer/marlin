@@ -1712,7 +1712,7 @@ int mdss_mode_switch(struct msm_fb_data_type *mfd, u32 mode)
 	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
 	struct mdss_mdp_ctl *sctl;
-	int rc;
+	int rc = 0;
 
 	pr_debug("fb%d switch to mode=%x\n", mfd->index, mode);
 	ATRACE_FUNC();
@@ -1792,6 +1792,10 @@ int mdss_mode_switch(struct msm_fb_data_type *mfd, u32 mode)
 	} else if (mode == MIPI_VIDEO_PANEL) {
 		if (ctl->ops.wait_pingpong)
 			rc = ctl->ops.wait_pingpong(ctl, NULL);
+		if (rc) {
+			pr_err("wait for pp failed\n");
+			return rc;
+                }
 		mdss_mdp_update_panel_info(mfd, 0, 0);
 		mdss_mdp_switch_to_vid_mode(ctl, 1);
 		mdss_mdp_ctl_stop(ctl, MDSS_PANEL_POWER_OFF);
@@ -2969,7 +2973,7 @@ static ssize_t dynamic_fps_sysfs_wta_dfps(struct device *dev,
 
 	if (pdata->panel_info.dfps_update ==
 		DFPS_IMMEDIATE_MULTI_UPDATE_MODE_CLK_HFP) {
-		if (sscanf(buf, "%d %d %d %d %d",
+		if (sscanf(buf, "%u %u %u %u %u",
 		    &data.hfp, &data.hbp, &data.hpw,
 		    &data.clk_rate, &data.fps) != 5) {
 			pr_err("could not read input\n");
@@ -3888,6 +3892,12 @@ static int mdss_mdp_hw_cursor_pipe_update(struct msm_fb_data_type *mfd,
 	req->transp_mask = img->bg_color & ~(0xff << var->transp.offset);
 
 	if (mfd->cursor_buf && (cursor->set & FB_CUR_SETIMAGE)) {
+		if (img->width * img->height * 4 > cursor_frame_size) {
+			pr_err("cursor image size is too large\n");
+			ret = -EINVAL;
+			goto done;
+		}
+
 		ret = copy_from_user(mfd->cursor_buf, img->data,
 				     img->width * img->height * 4);
 		if (ret) {

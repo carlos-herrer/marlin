@@ -689,8 +689,8 @@ static ssize_t mdss_fb_force_panel_dead(struct device *dev,
 		return len;
 	}
 
-	if (sscanf(buf, "%d", &pdata->panel_info.panel_force_dead) != 1)
-		pr_err("sccanf buf error!\n");
+	if (kstrtouint(buf, 0, &pdata->panel_info.panel_force_dead))
+		pr_err("kstrtouint buf error!\n");
 
 	return len;
 }
@@ -803,8 +803,8 @@ static ssize_t mdss_fb_change_dfps_mode(struct device *dev,
 	}
 	pinfo = &pdata->panel_info;
 
-	if (sscanf(buf, "%d", &dfps_mode) != 1) {
-		pr_err("sccanf buf error!\n");
+	if (kstrtouint(buf, 0, &dfps_mode)) {
+		pr_err("kstrtouint buf error!\n");
 		return len;
 	}
 
@@ -3279,7 +3279,7 @@ int mdss_fb_atomic_commit(struct fb_info *info,
 	struct mdp_layer_commit_v1 *commit_v1;
 	struct mdp_output_layer *output_layer;
 	struct mdss_panel_info *pinfo;
-	bool wait_for_finish, wb_change = false;
+	bool wait_for_finish, update = false, wb_change = false;
 	int ret = -EPERM;
 	u32 old_xres, old_yres, old_format;
 
@@ -3327,6 +3327,7 @@ int mdss_fb_atomic_commit(struct fb_info *info,
 						output_layer->buffer.width,
 						output_layer->buffer.height,
 						output_layer->buffer.format);
+					update = true;
 				}
 			}
 			ret = mfd->mdp.atomic_validate(mfd, file, commit_v1);
@@ -3367,7 +3368,7 @@ int mdss_fb_atomic_commit(struct fb_info *info,
 		ret = mdss_fb_pan_idle(mfd);
 
 end:
-	if (ret && (mfd->panel.type == WRITEBACK_PANEL) && wb_change)
+	if (update && ret && (mfd->panel.type == WRITEBACK_PANEL) && wb_change)
 		mdss_fb_update_resolution(mfd, old_xres, old_yres, old_format);
 	return ret;
 }

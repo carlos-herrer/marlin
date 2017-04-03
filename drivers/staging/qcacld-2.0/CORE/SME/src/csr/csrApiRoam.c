@@ -1101,6 +1101,18 @@ void csrAbortCommand( tpAniSirGlobal pMac, tSmeCmd *pCommand, tANI_BOOLEAN fStop
             csrReleaseCommandRemoveKey( pMac, pCommand );
             break;
 
+        case eSmeCommandNdpInitiatorRequest:
+            csr_release_ndp_initiator_req(pMac, pCommand);
+            break;
+
+        case eSmeCommandNdpResponderRequest:
+            csr_release_ndp_responder_req(pMac, pCommand);
+            break;
+
+        case eSmeCommandNdpDataEndInitiatorRequest:
+            csr_release_ndp_data_end_req(pMac, pCommand);
+            break;
+
     default:
             smsLog( pMac, LOGW, " CSR abort standard command %d", pCommand->command );
             csrReleaseCommand( pMac, pCommand );
@@ -6204,6 +6216,8 @@ static tANI_BOOLEAN csrRoamProcessResults( tpAniSirGlobal pMac, tSmeCmd *pComman
             else
                 pSession->connectState = eCSR_ASSOC_STATE_TYPE_WDS_DISCONNECTED;
 
+            roamInfo.staId = (uint8_t)pSmeStartBssRsp->staId;
+
             if (CSR_IS_NDI(pProfile)) {
                 csrRoamStateChange(pMac, eCSR_ROAMING_STATE_JOINED, sessionId);
                 pSirBssDesc = &pSmeStartBssRsp->bssDescription;
@@ -6335,14 +6349,8 @@ static tANI_BOOLEAN csrRoamProcessResults( tpAniSirGlobal pMac, tSmeCmd *pComman
                 if (CSR_IS_NDI(pProfile)) {
                     csr_roam_update_ndp_return_params(pMac, Result,
                                         &roamStatus, &roamResult, &roamInfo);
-                    csr_roam_fill_roaminfo_ndp(pMac, &roamInfo, roamResult,
-                                        pSmeStartBssRsp->statusCode,
-                                        0, 0);
                 }
 
-                //Only tell upper layer is we start the BSS because Vista doesn't like multiple connection
-                //indications. If we don't start the BSS ourself, handler of eSIR_SME_JOINED_NEW_BSS will
-                //trigger the connection start indication in Vista
                 roamInfo.statusCode = pSession->joinFailStatusCode.statusCode;
                 roamInfo.reasonCode = pSession->joinFailStatusCode.reasonCode;
                 //We start the IBSS (didn't find any matched IBSS out there)
@@ -6428,9 +6436,6 @@ static tANI_BOOLEAN csrRoamProcessResults( tpAniSirGlobal pMac, tSmeCmd *pComman
             if (CSR_IS_NDI(pProfile)) {
                 csr_roam_update_ndp_return_params(pMac, Result,
                                         &roamStatus, &roamResult, &roamInfo);
-                csr_roam_fill_roaminfo_ndp(pMac, &roamInfo, roamResult,
-                    (pSmeStartBssRsp) ? pSmeStartBssRsp->statusCode :
-                     eHAL_STATUS_FAILURE, 0, 0);
             }
 
             if(Context)
@@ -19146,7 +19151,7 @@ eHalStatus csrRoamReadTSF(tpAniSirGlobal pMac, tANI_U8 *pTimestamp,
                           tANI_U8 sessionId)
 {
     tCsrNeighborRoamBSSInfo handoffNode = {{0}};
-    tANI_U32                timer_diff = 0;
+    uint64_t                timer_diff = 0;
     tANI_U32                timeStamp[2];
     tpSirBssDescription     pBssDescription = NULL;
 
@@ -19155,10 +19160,11 @@ eHalStatus csrRoamReadTSF(tpAniSirGlobal pMac, tANI_U8 *pTimestamp,
         return eHAL_STATUS_FAILURE;
     }
     pBssDescription = handoffNode.pBssDescription;
-    // Get the time diff in milli seconds
-    timer_diff = vos_timer_get_system_time() - pBssDescription->scanSysTimeMsec;
-    // Convert msec to micro sec timer
-    timer_diff = (tANI_U32)(timer_diff * SYSTEM_TIME_MSEC_TO_USEC);
+    // Get the time diff in nano seconds
+    timer_diff = (vos_get_monotonic_boottime_ns() -
+                  pBssDescription->scansystimensec);
+    // Convert nano to micro sec timer
+    timer_diff = (timer_diff / SYSTEM_TIME_NSEC_TO_USEC);
     timeStamp[0] = pBssDescription->timeStamp[0];
     timeStamp[1] = pBssDescription->timeStamp[1];
     UpdateCCKMTSF(&(timeStamp[0]), &(timeStamp[1]), &timer_diff);
