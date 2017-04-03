@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -120,7 +120,6 @@ extern int process_wma_set_command(int sessid, int paramid,
 /* EID byte + length byte + four byte WiFi OUI */
 #define DOT11F_EID_HEADER_LEN (6)
 
-#define DUMP_DP_TRACE       0
 
 /*---------------------------------------------------------------------------
  *   Function definitions
@@ -1795,6 +1794,10 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
             }
 #endif /* QCA_PKT_PROTO_TRACE */
 
+            DPTRACE(adf_dp_trace_mgmt_pkt(ADF_DP_TRACE_MGMT_PACKET_RECORD,
+                           pHostapdAdapter->sessionId,
+                           ADF_PROTO_TYPE_MGMT, ADF_PROTO_MGMT_ASSOC));
+
 #ifdef FEATURE_BUS_BANDWIDTH
             /* start timer in sap/p2p_go */
             if (pHddApCtx->bApActive == VOS_FALSE)
@@ -1917,6 +1920,11 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
                vos_pkt_trace_buf_update("HA:DISASC");
             }
 #endif /* QCA_PKT_PROTO_TRACE */
+
+            DPTRACE(adf_dp_trace_mgmt_pkt(ADF_DP_TRACE_MGMT_PACKET_RECORD,
+                           pHostapdAdapter->sessionId,
+                           ADF_PROTO_TYPE_MGMT, ADF_PROTO_MGMT_DISASSOC));
+
             hdd_softap_DeregisterSTA(pHostapdAdapter, staId);
 
             pHddApCtx->bApActive = VOS_FALSE;
@@ -2587,6 +2595,10 @@ static int __iw_softap_set_two_ints_getnone(struct net_device *dev,
             value[1], value[2]);
         if (value[1] == DUMP_DP_TRACE)
             adf_dp_trace_dump_all(value[2]);
+        else if (value[1] == ENABLE_DP_TRACE_LIVE_MODE)
+            adf_dp_trace_enable_live_mode();
+        else if (value[1] == CLEAR_DP_TRACE_BUFFER)
+            adf_dp_trace_clear_buffer();
         else
             hddLog(LOGE, "unexpected value for dump_dp_trace");
         break;
@@ -5457,6 +5469,13 @@ static int __iw_set_ap_genie(struct net_device *dev,
     {
         EXIT();
         return 0;
+    }
+
+    if (wrqu->data.length > DOT11F_IE_RSN_MAX_LEN) {
+       VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+               "%s: WPARSN Ie input length is more than max[%d]", __func__,
+                wrqu->data.length);
+       return -EINVAL;
     }
 
     switch (genie[0])

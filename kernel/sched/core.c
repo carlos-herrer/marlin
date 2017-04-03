@@ -93,6 +93,7 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 #include "walt.h"
+#include "tune.h"
 
 void start_bandwidth_timer(struct hrtimer *period_timer, ktime_t period)
 {
@@ -2892,7 +2893,7 @@ unsigned long sum_capacity_reqs(unsigned long cfs_cap,
 
 static void sched_freq_tick_pelt(int cpu)
 {
-	unsigned long cpu_utilization = cpu_util(cpu, UTIL_EST);
+	unsigned long cpu_utilization = boosted_cpu_util(cpu);
 	unsigned long capacity_curr = capacity_curr_of(cpu);
 	struct sched_capacity_reqs *scr;
 
@@ -2926,6 +2927,10 @@ static void sched_freq_tick_walt(int cpu)
 	 * NOTE: WALT tracks a single CPU signal for all the scheduling
 	 * classes, thus this margin is going to be added to the DL class as
 	 * well, which is something we do not do in sched_freq_tick_pelt case.
+	 *
+	 * TODO:
+	 * Here we're adding margin, but we're also adding margin in cpufreq.
+	 * There shouldn't be a double addition.
 	 */
 	cpu_utilization = add_capacity_margin(cpu_utilization);
 	if (cpu_utilization <= capacity_curr)
@@ -2937,7 +2942,6 @@ static void sched_freq_tick_walt(int cpu)
 	 * extra boost.
 	 */
 	set_cfs_cpu_capacity(cpu, true, cpu_utilization);
-
 }
 #define _sched_freq_tick(cpu) sched_freq_tick_walt(cpu)
 #else
@@ -6466,6 +6470,28 @@ static void init_sched_energy(int cpu, struct sched_domain *sd,
 
 	sd->groups->sge = fn(cpu);
 }
+
+#ifdef CONFIG_SCHED_DEBUG
+void set_energy_aware()
+{
+	sched_feat_set("ENERGY_AWARE");
+}
+void clear_energy_aware()
+{
+	sched_feat_set("NO_ENERGY_AWARE");
+}
+#else
+struct static_key __read_mostly __energy_aware = STATIC_KEY_INIT_FALSE;
+
+void set_energy_aware()
+{
+	static_key_slow_inc(&__energy_aware);
+}
+void clear_energy_aware()
+{
+	static_key_slow_dec(&__energy_aware);
+}
+#endif /* CONFIG_SCHED_DEBUG */
 
 /*
  * Initializers for schedule domains

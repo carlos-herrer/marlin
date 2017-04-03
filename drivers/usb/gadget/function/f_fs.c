@@ -38,6 +38,7 @@
 #include "configfs.h"
 
 #define FUNCTIONFS_MAGIC	0xa647361 /* Chosen by a honest dice roll ;) */
+#define ENDPOINT_ALLOC_MAX	1 << 25 /* Max endpoint buffer size, 32 MB */
 
 /* Reference counter handling */
 static void ffs_data_get(struct ffs_data *ffs);
@@ -137,6 +138,9 @@ struct ffs_epfile {
 
 	unsigned char			_pad;
 	atomic_t			opened;
+
+	unsigned long			buf_len;
+	char				*buffer;
 };
 
 /*  ffs_io_data structure ***************************************************/
@@ -791,10 +795,11 @@ static ssize_t ffs_epfile_io(struct file *file, struct ffs_io_data *io_data)
 		spin_unlock_irq(&epfile->ffs->eps_lock);
 
 		if (!io_data->read)
-			data = kmalloc(data_len + extra_buf_alloc,
-					GFP_KERNEL);
-		else
-			data = kmalloc(data_len, GFP_KERNEL);
+			data_len += extra_buf_alloc;
+
+		data = (data_len > epfile->buf_len || io_data->aio) ?
+			kmalloc(data_len, GFP_KERNEL) :
+			epfile->buffer;
 		if (unlikely(!data))
 			return -ENOMEM;
 		if (io_data->aio && !io_data->read) {
@@ -881,25 +886,16 @@ static ssize_t ffs_epfile_io(struct file *file, struct ffs_io_data *io_data)
 
 			spin_unlock_irq(&epfile->ffs->eps_lock);
 		} else {
-			struct completion *done;
+			DECLARE_COMPLETION_ONSTACK(done);
 
 			req = ep->req;
 			req->buf      = data;
 			req->length   = data_len;
+
+			req->context  = &done;
 			req->complete = ffs_epfile_io_complete;
 			ret	      = 0;
 
-			if (io_data->read) {
-				reinit_completion(
-						&epfile->ffs->epout_completion);
-				done = &epfile->ffs->epout_completion;
-				req->context  = done;
-			} else {
-				reinit_completion(
-						&epfile->ffs->epin_completion);
-				done = &epfile->ffs->epin_completion;
-				req->context  = done;
-			}
 
 			/* Don't queue another read if previous is still busy */
 			if (!(io_data->read && ep->is_busy)) {
@@ -912,7 +908,7 @@ static ssize_t ffs_epfile_io(struct file *file, struct ffs_io_data *io_data)
 			if (unlikely(ret < 0)) {
 				ret = -EIO;
 			} else if (unlikely(
-				   wait_for_completion_interruptible(done))) {
+				   wait_for_completion_interruptible(&done))) {
 				spin_lock_irq(&epfile->ffs->eps_lock);
 				/*
 				 * While we were acquiring lock endpoint got
@@ -946,10 +942,10 @@ static ssize_t ffs_epfile_io(struct file *file, struct ffs_io_data *io_data)
 				if (io_data->read && ret > 0) {
 					if (io_data->len != MAX_BUF_LEN &&
 							ret < io_data->len)
-						pr_err("less data(%zd) recieved than intended length(%zu)\n",
+						pr_debug("less data(%zd) received than intended length(%zu)\n",
 							ret, io_data->len);
 					else if (ret > io_data->len)
-						pr_err("More data(%zd) recieved than intended length(%zu)\n",
+						pr_err("More data(%zd) received than intended length(%zu)\n",
 							ret, io_data->len);
 
 					ret = min_t(size_t, ret, io_data->len);
@@ -962,7 +958,8 @@ static ssize_t ffs_epfile_io(struct file *file, struct ffs_io_data *io_data)
 					}
 				}
 			}
-			kfree(data);
+			if (data_len > epfile->buf_len || io_data->aio)
+				kfree(data);
 		}
 	}
 
@@ -973,7 +970,8 @@ error_lock:
 	spin_unlock_irq(&epfile->ffs->eps_lock);
 	mutex_unlock(&epfile->mutex);
 error:
-	kfree(data);
+	if (data_len > epfile->buf_len || io_data->aio)
+		kfree(data);
 	if (ret < 0)
 		pr_err_ratelimited("Error: returning %zd value\n", ret);
 	return ret;
@@ -1126,6 +1124,9 @@ ffs_epfile_release(struct inode *inode, struct file *file)
 
 	atomic_set(&epfile->opened, 0);
 	atomic_set(&epfile->error, 1);
+	epfile->buf_len = 0;
+	kfree(epfile->buffer);
+	epfile->buffer = NULL;
 	ffs_data_closed(epfile->ffs);
 	file->private_data = NULL;
 
@@ -1136,7 +1137,7 @@ static long ffs_epfile_ioctl(struct file *file, unsigned code,
 			     unsigned long value)
 {
 	struct ffs_epfile *epfile = file->private_data;
-	int ret;
+	int ret = 0;
 
 	ENTER();
 
@@ -1144,7 +1145,7 @@ static long ffs_epfile_ioctl(struct file *file, unsigned code,
 		return -ENODEV;
 
 	spin_lock_irq(&epfile->ffs->eps_lock);
-	if (likely(epfile->ep)) {
+	if (epfile->ep) {
 		switch (code) {
 		case FUNCTIONFS_FIFO_STATUS:
 			ret = usb_ep_fifo_status(epfile->ep->ep);
@@ -1181,6 +1182,29 @@ static long ffs_epfile_ioctl(struct file *file, unsigned code,
 			if (ret)
 				ret = -EFAULT;
 			return ret;
+		}
+		case FUNCTIONFS_ENDPOINT_ALLOC:
+		{
+			void *temp = epfile->buffer;
+			epfile->buffer = NULL;
+			epfile->buf_len = 0;
+			spin_unlock_irq(&epfile->ffs->eps_lock);
+
+			kfree(temp);
+			if (!value)
+				return 0;
+			if (value > ENDPOINT_ALLOC_MAX)
+				return -EINVAL;
+
+			temp = kzalloc(value, GFP_KERNEL);
+			if (!temp)
+				return -ENOMEM;
+
+			spin_lock_irq(&epfile->ffs->eps_lock);
+			epfile->buffer = temp;
+			epfile->buf_len = value;
+			ret = 0;
+			break;
 		}
 		default:
 			ret = -ENOTTY;
@@ -1417,7 +1441,7 @@ ffs_fs_mount(struct file_system_type *t, int flags,
 	};
 	struct dentry *rv;
 	int ret;
-	void *ffs_dev;
+	struct ffs_dev *ffs_dev;
 	struct ffs_data	*ffs;
 
 	ENTER();
@@ -1443,6 +1467,7 @@ ffs_fs_mount(struct file_system_type *t, int flags,
 		return ERR_CAST(ffs_dev);
 	}
 	ffs->private_data = ffs_dev;
+	ffs_dev->ffs_data = ffs;
 	data.ffs_data = ffs;
 
 	rv = mount_nodev(t, flags, &data, ffs_sb_fill);
@@ -1565,8 +1590,6 @@ static struct ffs_data *ffs_data_new(void)
 	spin_lock_init(&ffs->eps_lock);
 	init_waitqueue_head(&ffs->ev.waitq);
 	init_completion(&ffs->ep0req_completion);
-	init_completion(&ffs->epout_completion);
-	init_completion(&ffs->epin_completion);
 
 	/* XXX REVISIT need to update it in some places, or do we? */
 	ffs->ev.can_stall = 1;

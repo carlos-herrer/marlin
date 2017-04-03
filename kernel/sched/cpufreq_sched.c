@@ -79,6 +79,7 @@ static void cpufreq_sched_try_driver_target(struct cpufreq_policy *policy,
 static bool finish_last_request(struct gov_data *gd, unsigned int cur_freq)
 {
 	ktime_t now = ktime_get();
+	int usec_left;
 
 	ktime_t throttle = gd->requested_freq < cur_freq ?
 		gd->down_throttle : gd->up_throttle;
@@ -86,16 +87,16 @@ static bool finish_last_request(struct gov_data *gd, unsigned int cur_freq)
 	if (ktime_after(now, throttle))
 		return false;
 
-	while (1) {
-		int usec_left = ktime_to_ns(ktime_sub(throttle, now));
+	usec_left = ktime_to_ns(ktime_sub(throttle, now));
+	usec_left /= NSEC_PER_USEC;
+	trace_cpufreq_sched_throttled(usec_left);
 
-		usec_left /= NSEC_PER_USEC;
-		trace_cpufreq_sched_throttled(usec_left);
-		usleep_range(usec_left, usec_left + 100);
-		now = ktime_get();
-		if (ktime_after(now, throttle))
-			return true;
-	}
+	/*
+	 * We may wake up early because of new requests
+	 */
+	usleep_range(usec_left, usec_left + 100);
+
+	return true;
 }
 
 /*
@@ -237,10 +238,25 @@ void update_cpu_capacity_request(int cpu, bool request)
 
 	scr = &per_cpu(cpu_sched_capacity_reqs, cpu);
 
-	new_capacity = scr->cfs + scr->rt;
+#ifdef CONFIG_SCHED_WALT
+	if (!walt_disabled && sysctl_sched_use_walt_cpu_util) {
+		/*
+		 * Same WALT signal is set at different places, take the max
+		 * reported utilization
+		 */
+		new_capacity = max(scr->cfs, scr->rt);
+		new_capacity = max(new_capacity, scr->dl);
+	} else {
+		/*
+		 * For PELT, utilization is aggregated
+		 */
+		new_capacity = scr->cfs + scr->rt + scr->dl;
+	}
+#else
+	new_capacity = scr->cfs + scr->rt + scr->dl;
+#endif
 	new_capacity = new_capacity * capacity_margin
 		/ SCHED_CAPACITY_SCALE;
-	new_capacity += scr->dl;
 
 	if (new_capacity == scr->total)
 		return;

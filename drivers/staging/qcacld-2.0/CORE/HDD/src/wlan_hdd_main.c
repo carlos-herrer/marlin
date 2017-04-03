@@ -5231,6 +5231,7 @@ static inline int drv_cmd_get_antenna_mode(hdd_adapter_t *adapter,
 		return -EFAULT;
 	}
 
+	hddLog(LOG1, FL("Get antenna mode ret: 0 mode: %s"), extra);
 	return 0;
 }
 
@@ -6343,7 +6344,7 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
                                                    pAdapter->sessionId,
                                                    nOpportunisticThresholdDiff);
        }
-       else if (strncmp(priv_data.buf, "GETOPPORTUNISTICRSSIDIFF", 24) == 0)
+       else if (strncmp(command, "GETOPPORTUNISTICRSSIDIFF", 24) == 0)
        {
            tANI_S8 val = sme_GetRoamOpportunisticScanThresholdDiff(
                                                                  pHddCtx->hHal);
@@ -6386,7 +6387,7 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
                                      pAdapter->sessionId,
                                      nRoamRescanRssiDiff);
        }
-       else if (strncmp(priv_data.buf, "GETROAMRESCANRSSIDIFF", 21) == 0)
+       else if (strncmp(command, "GETROAMRESCANRSSIDIFF", 21) == 0)
        {
            tANI_U8 val = sme_GetRoamRescanRssiDiff(pHddCtx->hHal);
            char extra[32];
@@ -7151,9 +7152,10 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
                ret = -EFAULT;
                goto exit;
             }
-            priv_data.buf[numOfBytestoPrint] = '\0';
+            /* This overwrites the last space, which we already copied */
+            extra[numOfBytestoPrint - 1] = '\0';
             VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_MED,
-                      "%s", priv_data.buf);
+                      "%s", extra);
 
             if (length > numOfBytestoPrint)
             {
@@ -7167,7 +7169,7 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
                     goto exit;
                 }
                 VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_MED,
-                          "%s", &priv_data.buf[numOfBytestoPrint]);
+                          "%s", &extra[numOfBytestoPrint]);
             }
 
             /* Free temporary buffer */
@@ -7273,7 +7275,7 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
 
          /* Success ! */
          VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_MED,
-                   "%s", priv_data.buf);
+                   "%s", extra);
          ret = 0;
        }
        else if (strncmp(command, "SETRMCTXRATE", 12) == 0)
@@ -7916,8 +7918,6 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
 
            ret = drv_cmd_get_antenna_mode(pAdapter, pHddCtx, command,
                                           14, &priv_data);
-           hddLog(LOG1, FL("Get antenna mode ret: %d mode: %s"),
-                  ret, priv_data.buf);
        } else if (strncmp(command, "STOP", 4) == 0) {
           hddLog(LOG1, FL("STOP command"));
           pHddCtx->driver_being_stopped = true;
@@ -9004,6 +9004,14 @@ static int __hdd_open(struct net_device *dev)
             WLAN_CONTROL_PATH);
    }
 
+   /* Enable carrier and transmit queues for NDI */
+   if (WLAN_HDD_IS_NDI(pAdapter)) {
+       hddLog(LOG1, FL("Enabling Tx Queues"));
+       wlan_hdd_netif_queue_control(pAdapter,
+            WLAN_START_ALL_NETIF_QUEUE_N_CARRIER,
+            WLAN_CONTROL_PATH);
+   }
+
    return 0;
 }
 
@@ -9096,7 +9104,7 @@ static int hdd_mon_open(struct net_device *dev)
  *
  * For module, when all the interfaces are down, enter low power mode.
  */
-static inline void wlan_hdd_stop_enter_lowpower(hdd_context_t *hdd_ctx)
+void wlan_hdd_stop_enter_lowpower(hdd_context_t *hdd_ctx)
 {
 	hddLog(VOS_TRACE_LEVEL_INFO,
 			"%s: All Interfaces are Down entering standby",
@@ -9215,7 +9223,7 @@ static int kickstart_driver(bool load, bool mode_change)
  * For static driver, when all the interfaces are down, enter low power mode by
  * bringing down WLAN hardware.
  */
-static inline void wlan_hdd_stop_enter_lowpower(hdd_context_t *hdd_ctx)
+void wlan_hdd_stop_enter_lowpower(hdd_context_t *hdd_ctx)
 {
 	bool ready;
 
@@ -9310,6 +9318,17 @@ static int __hdd_stop(struct net_device *dev)
    hddLog(LOG1, FL("Disabling queues"));
    wlan_hdd_netif_queue_control(pAdapter, WLAN_NETIF_TX_DISABLE_N_CARRIER,
                          WLAN_CONTROL_PATH);
+
+   /*
+    * NAN data interface is different in some sense. The traffic on NDI is
+    * bursty in nature and depends on the need to transfer. The service layer
+    * may down the interface after the usage and up again when required.
+    * In some sense, the NDI is expected to be available (like SAP) iface
+    * until NDI delete request is issued by the service layer.
+    * Skip BSS termination and adapter deletion for NAN Data interface (NDI).
+    */
+    if (WLAN_HDD_IS_NDI(pAdapter))
+       return 0;
 
    /* The interface is marked as down for outside world (aka kernel)
     * But the driver is pretty much alive inside. The driver needs to
@@ -11663,6 +11682,48 @@ VOS_STATUS hdd_reset_all_adapters( hdd_context_t *pHddCtx )
    return VOS_STATUS_SUCCESS;
 }
 
+#if defined CFG80211_CONNECT_BSS
+/**
+ * hdd_connect_bss() - API to send connection status to supplicant
+ * @dev: network device
+ * @bssid: bssid to which we want to associate
+ * @req_ie: Request Information Element
+ * @req_ie_len: len of the req IE
+ * @resp_ie: Response IE
+ * @resp_ie_len: len of ht response IE
+ * @status: status
+ * @gfp: Kernel Flag
+ * @connect_timeout: If timed out waiting for Auth/Assoc/Probe resp
+ *
+ * The API is a wrapper to send connection status to supplicant
+ *
+ * Return: Void
+ */
+#if defined CFG80211_CONNECT_TIMEOUT
+static void hdd_connect_bss(struct net_device *dev, const u8 *bssid,
+			struct cfg80211_bss *bss, const u8 *req_ie,
+			size_t req_ie_len, const u8 *resp_ie,
+			size_t resp_ie_len, int status, gfp_t gfp,
+			bool connect_timeout)
+{
+	if (connect_timeout)
+		cfg80211_connect_timeout(dev, bssid, NULL, 0, GFP_KERNEL);
+	else
+		cfg80211_connect_bss(dev, bssid, bss, req_ie, req_ie_len,
+			resp_ie, resp_ie_len, status, gfp);
+}
+#else
+static void hdd_connect_bss(struct net_device *dev, const u8 *bssid,
+			struct cfg80211_bss *bss, const u8 *req_ie,
+			size_t req_ie_len, const u8 *resp_ie,
+			size_t resp_ie_len, int status, gfp_t gfp,
+			bool connect_timeout)
+{
+	cfg80211_connect_bss(dev, bssid, bss, req_ie, req_ie_len,
+		resp_ie, resp_ie_len, status, gfp);
+}
+#endif
+
 /**
  * hdd_connect_result() - API to send connection status to supplicant
  * @dev: network device
@@ -11674,13 +11735,13 @@ VOS_STATUS hdd_reset_all_adapters( hdd_context_t *pHddCtx )
  * @resp_ie_len: len of ht response IE
  * @status: status
  * @gfp: Kernel Flag
+ * @connect_timeout: If timed out waiting for Auth/Assoc/Probe resp
  *
  * The API is a wrapper to send connection status to supplicant
  * and allow runtime suspend
  *
  * Return: Void
  */
-#if defined CFG80211_CONNECT_BSS
 void hdd_connect_result(struct net_device *dev,
 			const u8 *bssid,
 			tCsrRoamInfo *roam_info,
@@ -11689,7 +11750,8 @@ void hdd_connect_result(struct net_device *dev,
 			const u8 *resp_ie,
 			size_t resp_ie_len,
 			u16 status,
-			gfp_t gfp)
+			gfp_t gfp,
+			bool connect_timeout)
 {
 	hdd_adapter_t *padapter = (hdd_adapter_t *) netdev_priv(dev);
 	struct cfg80211_bss *bss = NULL;
@@ -11720,9 +11782,9 @@ void hdd_connect_result(struct net_device *dev,
 #endif
 	}
 
-	cfg80211_connect_bss(dev, bssid, bss, req_ie, req_ie_len,
-			     resp_ie, resp_ie_len, status, gfp);
-
+	hdd_connect_bss(dev, bssid, bss, req_ie,
+				req_ie_len, resp_ie, resp_ie_len,
+				status, gfp, connect_timeout);
 	vos_runtime_pm_allow_suspend(padapter->runtime_context.connect);
 }
 #else
@@ -11734,7 +11796,8 @@ void hdd_connect_result(struct net_device *dev,
 			const u8 * resp_ie,
 			size_t resp_ie_len,
 			u16 status,
-			gfp_t gfp)
+			gfp_t gfp,
+			bool connect_timeout)
 {
 	hdd_adapter_t *padapter = (hdd_adapter_t *) netdev_priv(dev);
 
@@ -11806,7 +11869,7 @@ VOS_STATUS hdd_start_all_adapters( hdd_context_t *pHddCtx )
                hdd_connect_result(pAdapter->dev, NULL, NULL,
                                        NULL, 0, NULL, 0,
                                        WLAN_STATUS_ASSOC_DENIED_UNSPEC,
-                                       GFP_KERNEL);
+                                       GFP_KERNEL, false);
             }
 
 #ifdef QCA_LL_TX_FLOW_CT
@@ -13084,6 +13147,7 @@ free_hdd_ctx:
    }
 
    wlan_hdd_deinit_tx_rx_histogram(pHddCtx);
+   hdd_free_probe_req_ouis(pHddCtx);
    wiphy_unregister(wiphy) ;
    wlan_hdd_cfg80211_deinit(wiphy);
    wiphy_free(wiphy) ;
@@ -14434,6 +14498,7 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
 #ifdef QCA_ARP_SPOOFING_WAR
    adf_os_device_t adf_ctx;
 #endif
+   struct sme_5g_band_pref_params band_pref_params;
 
    ENTER();
 
@@ -14491,6 +14556,9 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
    ((VosContextType*)(pVosContext))->pHDDContext = (v_VOID_t*)pHddCtx;
 
    pHddCtx->parent_dev = dev;
+   pHddCtx->last_scan_reject_session_id = 0xFF;
+   pHddCtx->last_scan_reject_reason = 0;
+   pHddCtx->last_scan_reject_timestamp = 0;
 
    init_completion(&pHddCtx->full_pwr_comp_var);
    init_completion(&pHddCtx->standby_comp_var);
@@ -14540,6 +14608,27 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
       hddLog(VOS_TRACE_LEVEL_FATAL, "%s: error parsing %s",
              __func__, WLAN_INI_FILE);
       goto err_config;
+   }
+
+   if (pHddCtx->cfg_ini->probe_req_ie_whitelist)
+   {
+      if (hdd_validate_prb_req_ie_bitmap(pHddCtx))
+      {
+         /* parse ini string probe req oui */
+         status = hdd_parse_probe_req_ouis(pHddCtx);
+         if (VOS_STATUS_SUCCESS != status)
+         {
+            hddLog(LOGE, FL("Error parsing probe req ouis - Ignoring them"
+                            " disabling white list"));
+            pHddCtx->cfg_ini->probe_req_ie_whitelist = false;
+         }
+      }
+      else
+      {
+         hddLog(LOGE, FL("invalid probe req ie bitmap and ouis,"
+                         " disabling white list"));
+         pHddCtx->cfg_ini->probe_req_ie_whitelist = false;
+      }
    }
 
    ((VosContextType*)pVosContext)->pHIFContext = hif_sc;
@@ -14785,6 +14874,14 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
        hddLog(VOS_TRACE_LEVEL_ERROR,
               "%s: WMI_PDEV_PARAM_TX_CHAIN_MASK_1SS failed %d",
               __func__, ret);
+   }
+
+   ret = process_wma_set_command(0, WMI_PDEV_PARAM_ARP_AC_OVERRIDE,
+                                 pHddCtx->cfg_ini->arp_ac_category, PDEV_CMD);
+   if (0 != ret) {
+       hddLog(LOGE,
+              "%s: WMI_PDEV_PARAM_ARP_AC_OVERRIDE failed AC: %d ret: %d",
+              __func__, pHddCtx->cfg_ini->arp_ac_category, ret);
    }
 
    status = hdd_set_sme_chan_list(pHddCtx);
@@ -15322,9 +15419,7 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
                                 wlan_hdd_cfg80211_extscan_callback);
 #endif /* FEATURE_WLAN_EXTSCAN */
     sme_set_rssi_threshold_breached_cb(pHddCtx->hHal, hdd_rssi_threshold_breached);
-#ifdef WLAN_FEATURE_LINK_LAYER_STATS
-   wlan_hdd_cfg80211_link_layer_stats_init(pHddCtx);
-#endif
+    wlan_hdd_cfg80211_link_layer_stats_init(pHddCtx);
 
    wlan_hdd_tsf_init(pHddCtx);
 
@@ -15396,6 +15491,22 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
        if (eHAL_STATUS_SUCCESS != hal_status)
            hddLog(LOGE, FL("Failed to disable Chan Avoidance Indcation"));
    }
+   if (pHddCtx->cfg_ini->enable_5g_band_pref) {
+        band_pref_params.rssi_boost_threshold_5g =
+                                  pHddCtx->cfg_ini->rssi_boost_threshold_5g;
+        band_pref_params.rssi_boost_factor_5g =
+                                  pHddCtx->cfg_ini->rssi_boost_factor_5g;
+        band_pref_params.max_rssi_boost_5g =
+                                  pHddCtx->cfg_ini->max_rssi_boost_5g;
+        band_pref_params.rssi_penalize_threshold_5g =
+                                  pHddCtx->cfg_ini->rssi_penalize_threshold_5g;
+        band_pref_params.rssi_penalize_factor_5g =
+                                  pHddCtx->cfg_ini->rssi_penalize_factor_5g;
+        band_pref_params.max_rssi_penalize_5g =
+                                  pHddCtx->cfg_ini->max_rssi_penalize_5g;
+        sme_set_5g_band_pref(pHddCtx->hHal, &band_pref_params);
+   }
+
    wlan_comp.status = 0;
    complete(&wlan_comp.wlan_start_comp);
    goto success;
@@ -15495,8 +15606,10 @@ err_histogram:
 
 err_free_hdd_context:
    /* wiphy_free() will free the HDD context so remove global reference */
-   if (pVosContext)
+   if (pVosContext) {
+      hdd_free_probe_req_ouis(pHddCtx);
       ((VosContextType*)(pVosContext))->pHDDContext = NULL;
+   }
 
    wiphy_free(wiphy) ;
    //kfree(wdev) ;

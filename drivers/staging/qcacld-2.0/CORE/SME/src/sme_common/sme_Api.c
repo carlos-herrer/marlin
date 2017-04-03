@@ -1051,6 +1051,17 @@ sme_process_cmd:
                                     csrReleaseCommand(pMac, pCommand);
                             }
                             break;
+                        case eSmeCommandNdpDataEndInitiatorRequest:
+                            csrLLUnlock(&pMac->sme.smeCmdActiveList);
+                            status = csr_process_ndp_data_end_request(pMac,
+                                                                      pCommand);
+                            if (!HAL_STATUS_SUCCESS(status)) {
+                                if (csrLLRemoveEntry(
+                                          &pMac->sme.smeCmdActiveList,
+                                             &pCommand->Link, LL_ACCESS_LOCK))
+                                    csrReleaseCommand(pMac, pCommand);
+                            }
+                            break;
                         case eSmeCommandDelStaSession:
                             csrLLUnlock( &pMac->sme.smeCmdActiveList );
                             csrProcessDelStaSessionCommand( pMac, pCommand );
@@ -3318,7 +3329,21 @@ eHalStatus sme_ProcessMsg(tHalHandle hHal, vos_msg_t* pMsg)
 #ifdef FEATURE_WLAN_EXTSCAN
           case eWNI_SME_EXTSCAN_FULL_SCAN_RESULT_IND:
           {
-		if (pMac->sme.pExtScanIndCb) {
+                tCsrRoamInfo *roam_info;
+                tpSirWifiFullScanResultEvent result =
+                             (tpSirWifiFullScanResultEvent) pMsg->bodyptr;
+
+                roam_info = vos_mem_malloc(sizeof(*roam_info));
+                if (roam_info) {
+                    vos_mem_zero(roam_info, sizeof(*roam_info));
+                    roam_info->pBssDesc = &result->bss_description;
+                    csrRoamCallCallback(pMac, 0, roam_info, 0,
+                        eCSR_ROAM_UPDATE_SCAN_RESULT, eCSR_ROAM_RESULT_NONE);
+                    vos_mem_free(roam_info);
+                } else
+                  smsLog( pMac, LOGE, FL("vos_mem_malloc failed:"));
+
+                if (pMac->sme.pExtScanIndCb) {
                     pMac->sme.pExtScanIndCb(pMac->hHdd,
                                             eSIR_EXTSCAN_FULL_SCAN_RESULT_IND,
                                             pMsg->bodyptr);
@@ -3326,6 +3351,7 @@ eHalStatus sme_ProcessMsg(tHalHandle hHal, vos_msg_t* pMsg)
                     smsLog(pMac, LOGE,
                            FL("callback not registered to process eWNI_SME_EXTSCAN_FULL_SCAN_RESULT_IND"));
                 }
+
                 vos_mem_free(pMsg->bodyptr);
                 break;
           }
@@ -3441,6 +3467,9 @@ eHalStatus sme_ProcessMsg(tHalHandle hHal, vos_msg_t* pMsg)
           case eWNI_SME_NDP_INITIATOR_RSP:
           case eWNI_SME_NDP_INDICATION:
           case eWNI_SME_NDP_RESPONDER_RSP:
+          case eWNI_SME_NDP_END_RSP:
+          case eWNI_SME_NDP_END_IND:
+          case eWNI_SME_NDP_PEER_DEPARTED_IND:
                sme_ndp_msg_processor(pMac, pMsg);
                break;
           default:
@@ -9256,8 +9285,8 @@ eHalStatus sme_8023MulticastList (tHalHandle hHal, tANI_U8 sessionId, tpSirRcvFl
      *Find the connected Infra / P2P_client connected session
     */
     if (CSR_IS_SESSION_VALID(pMac, sessionId) &&
-        csrIsConnStateInfra(pMac, sessionId))
-    {
+           (csrIsConnStateInfra(pMac, sessionId) ||
+           csr_is_ndi_started(pMac, sessionId))) {
         pSession = CSR_GET_SESSION( pMac, sessionId );
     }
 
@@ -9267,17 +9296,17 @@ eHalStatus sme_8023MulticastList (tHalHandle hHal, tANI_U8 sessionId, tpSirRcvFl
     }
 
     pRequestBuf = vos_mem_malloc(sizeof(tSirRcvFltMcAddrList));
-    if (NULL == pRequestBuf)
-    {
+    if (NULL == pRequestBuf) {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Not able to "
             "allocate memory for 8023 Multicast List request", __func__);
         return eHAL_STATUS_FAILED_ALLOC;
     }
 
-    if( !csrIsConnStateConnectedInfra (pMac, sessionId ))
-    {
-        VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Ignoring the "
-                       "indication as we are not connected", __func__);
+    if (!csrIsConnStateConnectedInfra(pMac, sessionId) &&
+            !csr_is_ndi_started(pMac, sessionId)) {
+        VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+            "%s: Request ignored, session %d is not connected or started",
+            __func__, sessionId);
         vos_mem_free(pRequestBuf);
         return eHAL_STATUS_FAILURE;
     }
@@ -19026,4 +19055,46 @@ eHalStatus sme_remove_bssid_from_scan_list(tHalHandle hal,
 	}
 
 	return status;
+}
+
+/*
+ * sme_set_band_specific_pref(): If 5G preference is enabled,set boost/drop
+ * params from ini.
+ * @hal_handle: Handle returned by mac_open
+ * @5g_pref_params: pref params from ini.
+ */
+void sme_set_5g_band_pref(tHalHandle hal_handle,
+                                struct sme_5g_band_pref_params *pref_params) {
+
+	tpAniSirGlobal mac_ctx = PMAC_STRUCT(hal_handle);
+	struct roam_ext_params *roam_params;
+	eHalStatus status    = eHAL_STATUS_SUCCESS;
+
+	if (!pref_params) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  "Invalid 5G pref params!");
+		return;
+	}
+	status = sme_AcquireGlobalLock( &mac_ctx->sme );
+	if (HAL_STATUS_SUCCESS(status)) {
+		roam_params = &mac_ctx->roam.configParam.roam_params;
+		roam_params->raise_rssi_thresh_5g =
+				pref_params->rssi_boost_threshold_5g;
+		roam_params->raise_factor_5g =
+				pref_params->rssi_boost_factor_5g;
+		roam_params->max_raise_rssi_5g =
+				pref_params->max_rssi_boost_5g;
+		roam_params->drop_rssi_thresh_5g =
+				pref_params->rssi_penalize_threshold_5g;
+		roam_params->drop_factor_5g =
+				pref_params->rssi_penalize_factor_5g;
+		roam_params->max_drop_rssi_5g =
+				pref_params->max_rssi_penalize_5g;
+
+		sme_ReleaseGlobalLock(&mac_ctx->sme);
+	}
+	else
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+			  "Unable to acquire global sme lock");
+
 }
