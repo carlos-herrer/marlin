@@ -1997,8 +1997,7 @@ static long mbim_ioctl(struct file *fp, unsigned cmd, unsigned long arg)
 	case MBIM_EP_LOOKUP:
 		if (!atomic_read(&mbim->online)) {
 			pr_warn("usb cable is not connected\n");
-			ret = -ENOTCONN;
-			break;
+			return -ENOTCONN;
 		}
 
 		switch (mbim->xport) {
@@ -2031,7 +2030,7 @@ static long mbim_ioctl(struct file *fp, unsigned cmd, unsigned long arg)
 		default:
 			ret = -ENODEV;
 			pr_err("unknown transport\n");
-			goto fail;
+			break;
 		}
 
 		ret = copy_to_user((void __user *)arg, &info,
@@ -2047,7 +2046,6 @@ static long mbim_ioctl(struct file *fp, unsigned cmd, unsigned long arg)
 		ret = -EINVAL;
 	}
 
-fail:
 	mbim_unlock(&mbim->ioctl_excl);
 
 	return ret;
