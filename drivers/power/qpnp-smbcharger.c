@@ -285,7 +285,6 @@ struct smbchg_chip {
 	struct delayed_work		force_hvdcp_work;
 	struct delayed_work             sink_current_change_work;
 	struct work_struct		hvdcp_redet_work;
-	struct work_struct		reset_batfet_work;
 	struct usb_typec_ctrl           utc;
 	u32				htc_wa_flags;
 #endif /* CONFIG_HTC_BATT */
@@ -1420,19 +1419,6 @@ static int pmi8996_charger_termination_control(bool enable)
 	return rc;
 }
 
-void smbchg_reset_batfet_worker(struct work_struct *work)
-{
-	int rc = 0;
-	struct smbchg_chip *chip = container_of(work,
-						struct smbchg_chip,
-						reset_batfet_work);
-
-	rc = pmi8996_charger_reset_batfet(chip);
-	if (rc < 0) {
-		dev_err(chip->dev, "unable to reset batfet rc=%d\n", rc);
-	}
-}
-
 #define HOT_BAT_HARD_BIT	BIT(0)
 #define COLD_BAT_HARD_BIT	BIT(2)
 int pmi8996_charger_batfet_switch(bool enable)
@@ -1485,7 +1471,12 @@ int pmi8996_charger_batfet_switch(bool enable)
 			return rc;
 		}
 		if (chgr_rt_reg & BAT_TCC_REACHED_BIT) {
-			schedule_work(&chip->reset_batfet_work);
+			rc = pmi8996_charger_reset_batfet(chip);
+			if (rc < 0) {
+				dev_err(chip->dev,
+					"unable to reset batfet rc=%d\n", rc);
+				return rc;
+			}
 		}
 	} else {
 		/* Enable charger termination mechanism */
@@ -1496,8 +1487,11 @@ int pmi8996_charger_batfet_switch(bool enable)
 				rc);
 			return rc;
 		}
-		if (chgr_rt_reg & BAT_TCC_REACHED_BIT) {
-			schedule_work(&chip->reset_batfet_work);
+		rc = pmi8996_charger_reset_batfet(chip);
+		if (rc < 0) {
+			dev_err(chip->dev,
+				"unable to reset batfet rc=%d\n", rc);
+			return rc;
 		}
 	}
 
@@ -10354,7 +10348,6 @@ static int smbchg_probe(struct spmi_device *spmi)
 	INIT_DELAYED_WORK(&chip->force_hvdcp_work, smbchg_force_hvdcp_worker);
 	INIT_DELAYED_WORK(&chip->sink_current_change_work, smbchg_sink_current_change_worker);
 	INIT_WORK(&chip->hvdcp_redet_work, smbchg_hvdcp_redet_worker);
-	INIT_WORK(&chip->reset_batfet_work, smbchg_reset_batfet_worker);
 #endif /* CONFIG_HTC_BATT */
 	init_completion(&chip->src_det_lowered);
 	init_completion(&chip->src_det_raised);
