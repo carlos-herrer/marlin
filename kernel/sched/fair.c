@@ -6332,6 +6332,10 @@ static int select_energy_cpu_brute(struct task_struct *p, int prev_cpu, int sync
 	schedstat_inc(p, se.statistics.nr_wakeups_secb_count);
 	schedstat_inc(this_rq(), eas_stats.secb_count);
 
+unlock:
+	rcu_read_unlock();
+
+
 	return target_cpu;
 }
 
