@@ -12,7 +12,7 @@ clear
 THREAD="-j$(grep -c ^processor /proc/cpuinfo)"
 KERNEL="Image"
 DTBIMAGE="dtb"
-export CROSS_COMPILE=${HOME}/android/uberbuild/out/aarch64-linux-android-6.x/bin/aarch64-linux-android-
+export CROSS_COMPILE=${HOME}/android/uberbuild/out/aarch64-linux-android-4.9/bin/aarch64-linux-android-
 DEFCONFIG="sharkey_defconfig"
 
 # Kernel Details
@@ -55,7 +55,7 @@ function make_dtb {
 }
 
 function make_boot {
-		cp -vr $ZIMAGE_DIR/Image.gz-dtb ~/android/AnyKernel2/zImage
+		cp -vr $ZIMAGE_DIR/Image.lz4-dtb ~/android/AnyKernel2/zImage
 }
 
 
