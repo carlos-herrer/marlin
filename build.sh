@@ -20,9 +20,9 @@ VER=".R1.marlin"
 
 # Paths
 KERNEL_DIR=`pwd`
-REPACK_DIR="${HOME}/android/AnyKernel2"
-PATCH_DIR="${HOME}/android/AnyKernel2/patch"
-MODULES_DIR="${HOME}/android/AnyKernel2/modules"
+REPACK_DIR="${HOME}/android/AK-OnePone-AnyKernel2"
+PATCH_DIR="${HOME}/android/AK-OnePone-AnyKernel2/patch"
+MODULES_DIR="${HOME}/android/AK-OnePone-AnyKernel2/modules"
 ZIP_MOVE="${HOME}/android/AK-releases"
 ZIMAGE_DIR="${HOME}/android/marlin/arch/arm64/boot/"
 
@@ -55,12 +55,12 @@ function make_dtb {
 }
 
 function make_boot {
-		cp -vr $ZIMAGE_DIR/Image.lz4-dtb ~/android/AnyKernel2/zImage
+		cp -vr $ZIMAGE_DIR/Image.lz4-dtb ~/android/marlin/out/kernel/zImage
 }
 
 
 function make_zip {
-		cd ~/android/AnyKernel2
+		cd ~/android/marlin/out
 		zip -r9 `echo $AK_VER`.zip *
 		mv  `echo $AK_VER`.zip $ZIP_MOVE
 		cd $KERNEL_DIR
